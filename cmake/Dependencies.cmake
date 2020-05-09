@@ -274,44 +274,59 @@ if(INTERN_BUILD_MOBILE AND INTERN_USE_EIGEN_BLAS)
 endif()
 
 # ---[ pthreadpool
-# QNNPACK and NNPACK both depend on pthreadpool, but when building with libtorch
-# they should use the pthreadpool implementation under caffe2/utils/threadpool
-# instead of the default implementation. To avoid confusion, add pthreadpool
-# subdirectory explicitly with EXCLUDE_FROM_ALL property prior to QNNPACK/NNPACK
-# does so, which will prevent it from installing the default pthreadpool library.
-if(INTERN_BUILD_MOBILE AND NOT BUILD_CAFFE2_MOBILE AND (USE_QNNPACK OR USE_NNPACK OR USE_XNNPACK))
-  if(NOT DEFINED PTHREADPOOL_SOURCE_DIR)
-    set(CAFFE2_THIRD_PARTY_ROOT "${PROJECT_SOURCE_DIR}/third_party")
-    set(PTHREADPOOL_SOURCE_DIR "${CAFFE2_THIRD_PARTY_ROOT}/pthreadpool" CACHE STRING "pthreadpool source directory")
-  endif()
+# pthreadpool is a C library with no concept of namespaces, which means two
+# copies of the library cannot exist in the same binary or symbol collision
+# will occur violating ODR.  The conundrum is that Caffe2 provides its own
+# custom implementation of pthreadpool under the exact same interface the open
+# source version operates under; an implementation that is only used in Caffe2
+# operators and Caffe2's usage of NNPACK and QNNPACK. On the other hand, we
+# are interested in using the open source implementation on PyTorch which seems
+# to have been updated to exhibit superior performance.  Here we try to solve
+# this conundrum by prefering to pick the internal Caffe2 implementation if
+# BUILD_CAFFE2_OPS is on.  This will force both PyTorch and Caffe2 to use the
+# Caffe2 pthreadpool version (remember we cannot have two copies in one binary)
+# and in doing so we achieve our goal of keeping Caffe2's behavior intact if
+# at the cost of some performance loss to PyTorch.  Otherwise, if BUILD_CAFFE2_OPS
+# is not requested, we take the liberty of picking the open source version to
+# improve PyTorch's performance.  All of this admittedly error prone logic
+# can be removed and simplified if and when we decide to migrate Caffe2 to the
+# open source pthreadpool as well.
 
-  if(NOT TARGET pthreadpool)
-    set(PTHREADPOOL_BUILD_TESTS OFF CACHE BOOL "")
-    set(PTHREADPOOL_BUILD_BENCHMARKS OFF CACHE BOOL "")
-    add_subdirectory(
-      "${PTHREADPOOL_SOURCE_DIR}"
-      "${CONFU_DEPENDENCIES_BINARY_DIR}/pthreadpool"
-      EXCLUDE_FROM_ALL)
-  endif()
-endif()
+if(NOT USE_SYSTEM_PTHREADPOOL)
+  # Opt for custom Caffe2 implementation whenever BUILD_CAFFE2_OPS is enabled
+  if(BUILD_CAFFE2_OPS)
+    set(USE_INTERNAL_PTHREADPOOL_IMPL ON CACHE BOOL "" FORCE)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DUSE_INTERNAL_PTHREADPOOL_IMPL")
 
-# XNNPACK has not option of like QNNPACK_CUSTOM_THREADPOOL
-# that allows us to hijack pthreadpool interface.
-# Thus not doing this ends up building pthreadpool as well as
-# the internal implemenation of pthreadpool which results in symbol conflicts.
-if(USE_XNNPACK AND NOT USE_SYSTEM_XNNPACK)
-  if(NOT DEFINED PTHREADPOOL_SOURCE_DIR)
-    set(CAFFE2_THIRD_PARTY_ROOT "${PROJECT_SOURCE_DIR}/third_party")
-    set(PTHREADPOOL_SOURCE_DIR "${CAFFE2_THIRD_PARTY_ROOT}/pthreadpool" CACHE STRING "pthreadpool source directory")
-  endif()
+    # XNNPACK cannot link against a custom implementation of pthreadpool
+    caffe2_update_option(USE_XNNPACK OFF)
 
-  if(NOT TARGET pthreadpool)
-    set(PTHREADPOOL_BUILD_TESTS OFF CACHE BOOL "")
-    set(PTHREADPOOL_BUILD_BENCHMARKS OFF CACHE BOOL "")
-    add_subdirectory(
-      "${PTHREADPOOL_SOURCE_DIR}"
-      "${CONFU_DEPENDENCIES_BINARY_DIR}/pthreadpool"
-      EXCLUDE_FROM_ALL)
+  # But try using the open source implementation if, and only if:
+  elseif(
+    # We are on a mobile build of PyTorch (for at::parallel_for) regardless
+    # of whether NNPACK and family are requested, or
+    (INTERN_BUILD_MOBILE AND NOT BUILD_CAFFE2_MOBILE) OR
+    # We are on a mobile or non-mobile build of PyTorch where (non system)
+    # NNPACK or family are requested.
+    (USE_NNPACK OR USE_QNNPACK OR USE_PYTORCH_QNNPACK OR (USE_XNNPACK AND NOT USE_SYSTEM_XNNPACK))
+  )
+    set(USE_INTERNAL_PTHREADPOOL_IMPL OFF CACHE BOOL "" FORCE)
+
+    if(NOT DEFINED PTHREADPOOL_SOURCE_DIR)
+      set(CAFFE2_THIRD_PARTY_ROOT "${PROJECT_SOURCE_DIR}/third_party")
+      set(PTHREADPOOL_SOURCE_DIR "${CAFFE2_THIRD_PARTY_ROOT}/pthreadpool" CACHE STRING "pthreadpool source directory")
+    endif()
+
+    if(NOT TARGET pthreadpool)
+      set(PTHREADPOOL_BUILD_TESTS OFF CACHE BOOL "")
+      set(PTHREADPOOL_BUILD_BENCHMARKS OFF CACHE BOOL "")
+      add_subdirectory(
+        "${PTHREADPOOL_SOURCE_DIR}"
+        "${CONFU_DEPENDENCIES_BINARY_DIR}/pthreadpool")
+      set_property(TARGET pthreadpool PROPERTY POSITION_INDEPENDENT_CODE ON)
+    endif()
+
+    list(APPEND Caffe2_DEPENDENCY_LIBS pthreadpool)
   endif()
 endif()
 
@@ -362,9 +377,12 @@ if(USE_QNNPACK)
   endif()
 
   if(NOT TARGET qnnpack)
+    if(NOT USE_SYSTEM_PTHREADPOOL AND USE_INTERNAL_PTHREADPOOL_IMPL)
+      set(QNNPACK_CUSTOM_THREADPOOL ON CACHE BOOL "")
+    endif()
+
     set(QNNPACK_BUILD_TESTS OFF CACHE BOOL "")
     set(QNNPACK_BUILD_BENCHMARKS OFF CACHE BOOL "")
-    set(QNNPACK_CUSTOM_THREADPOOL ON CACHE BOOL "")
     set(QNNPACK_LIBRARY_TYPE "static" CACHE STRING "")
     add_subdirectory(
       "${QNNPACK_SOURCE_DIR}"
@@ -372,7 +390,6 @@ if(USE_QNNPACK)
     # We build static versions of QNNPACK and pthreadpool but link
     # them into a shared library for Caffe2, so they need PIC.
     set_property(TARGET qnnpack PROPERTY POSITION_INDEPENDENT_CODE ON)
-    set_property(TARGET pthreadpool PROPERTY POSITION_INDEPENDENT_CODE ON)
     set_property(TARGET cpuinfo PROPERTY POSITION_INDEPENDENT_CODE ON)
   endif()
 
@@ -393,9 +410,12 @@ if(USE_PYTORCH_QNNPACK)
     endif()
 
     if(NOT TARGET pytorch_qnnpack)
+      if(NOT USE_SYSTEM_PTHREADPOOL AND USE_INTERNAL_PTHREADPOOL_IMPL)
+        set(PYTORCH_QNNPACK_CUSTOM_THREADPOOL ON CACHE BOOL "")
+      endif()
+
       set(PYTORCH_QNNPACK_BUILD_TESTS OFF CACHE BOOL "")
       set(PYTORCH_QNNPACK_BUILD_BENCHMARKS OFF CACHE BOOL "")
-      set(PYTORCH_QNNPACK_CUSTOM_THREADPOOL ON CACHE BOOL "")
       set(PYTORCH_QNNPACK_LIBRARY_TYPE "static" CACHE STRING "")
       add_subdirectory(
         "${PYTORCH_QNNPACK_SOURCE_DIR}"
@@ -403,9 +423,6 @@ if(USE_PYTORCH_QNNPACK)
       # We build static versions of QNNPACK and pthreadpool but link
       # them into a shared library for Caffe2, so they need PIC.
       set_property(TARGET pytorch_qnnpack PROPERTY POSITION_INDEPENDENT_CODE ON)
-      if(NOT USE_SYSTEM_PTHREADPOOL)
-        set_property(TARGET pthreadpool PROPERTY POSITION_INDEPENDENT_CODE ON)
-      endif()
       set_property(TARGET cpuinfo PROPERTY POSITION_INDEPENDENT_CODE ON)
     endif()
 
@@ -440,7 +457,6 @@ if(USE_XNNPACK AND NOT USE_SYSTEM_XNNPACK)
   endif()
 
   if(NOT TARGET XNNPACK)
-    set(XNNPACK_CUSTOM_THREADPOOL ON CACHE BOOL "")
     set(XNNPACK_LIBRARY_TYPE "static" CACHE STRING "")
     set(XNNPACK_BUILD_BENCHMARKS OFF CACHE BOOL "")
     set(XNNPACK_BUILD_TESTS OFF CACHE BOOL "")
@@ -450,15 +466,6 @@ if(USE_XNNPACK AND NOT USE_SYSTEM_XNNPACK)
       "${CONFU_DEPENDENCIES_BINARY_DIR}/XNNPACK")
 
     set_property(TARGET XNNPACK PROPERTY POSITION_INDEPENDENT_CODE ON)
-    # Context: pthreadpool_get_threads_count implementation that is built in pytorch, uses
-    # implementation defined in caffe2/utils/threadpool/pthreadpool_impl.cc. This implementation
-    # assumes the the pthreadpool* passed is of type caffe2::ThradPool and thus does reinterpret cast.
-    # This is not valid when we create pthreadpool via caffe2::xnnpack_threadpool, which is of type
-    # compatible with new pthreadpool interface and is used in PT's XNNPACK integration.
-    # Thus all the calls for pthreadpool_get_threads_count originating from XNNPACK must be routed
-    # appropriately to pthreadpool_get_threads_count_xnnpack, which does not do the aforementioned
-    # casting to caffe2::ThradPool. Once the threadpools are unified, we will not need this.
-    target_compile_definitions(XNNPACK PRIVATE -Dpthreadpool_get_threads_count=pthreadpool_get_threads_count_xnnpack)
   endif()
 
   include_directories(SYSTEM ${XNNPACK_INCLUDE_DIR})
