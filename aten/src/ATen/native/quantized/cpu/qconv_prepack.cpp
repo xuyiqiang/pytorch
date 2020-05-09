@@ -168,7 +168,6 @@ c10::intrusive_ptr<ConvPackedParamsBase<kSpatialDim>> PackedConvWeightsQnnp<kSpa
       weight.ndimension() == 4,
       "quantized::conv2d_prepack (qnnpack): Weights are expected to have 4 "
       "dimensions");
-  const auto qtype = weight.qscheme();
   TORCH_CHECK(
       weight.qscheme() == c10::kPerTensorAffine,
       "quantized::conv2d_prepack (qnnpack): only supports Per Tensor "
@@ -189,7 +188,6 @@ c10::intrusive_ptr<ConvPackedParamsBase<kSpatialDim>> PackedConvWeightsQnnp<kSpa
   // QNNPACK expects weights to be of the format {out_c, kH, kW, in_c/groups},
   // but PyTorch lays them out as {out_c, in_c/groups, kH, kW}
   const size_t out_ch = weight.size(0);
-  const size_t in_ch = weight.size(1) * groups;
   const uint32_t kernel_h = weight.size(2);
   const uint32_t kernel_w = weight.size(3);
 
@@ -210,31 +208,11 @@ c10::intrusive_ptr<ConvPackedParamsBase<kSpatialDim>> PackedConvWeightsQnnp<kSpa
       bias_fp32.sizes(),
       " instead");
 
-  uint32_t stride_h = stride[0];
-  uint32_t stride_w = stride[1];
-  uint32_t pad_t = padding[0];
-  uint32_t pad_l = padding[1];
-  uint32_t dilation_h = dilation[0];
-  uint32_t dilation_w = dilation[1];
-
-  qnnpack::conv_param_t conv_p(
-      {kernel_w, kernel_h},
-      {stride_w, stride_h},
-      {dilation_w, dilation_h},
-      {pad_t, pad_l, pad_t, pad_l},
-      /*adjustment=*/{0, 0},
-      groups,
-      in_ch,
-      out_ch,
-      weight.q_zero_point(),
-      weight.q_scale(),
-      std::numeric_limits<uint8_t>::min(),
-      std::numeric_limits<uint8_t>::max(),
-      /*transpose=*/false);
-
-
   auto weight_contig = weight.contiguous(c10::MemoryFormat::ChannelsLast);
 
+  at::Tensor w_zero_points, w_scales;
+  std::tie(w_zero_points, w_scales) =
+      make_zero_points_and_scales_tensor(weight_contig);
   // We set the pre-packed conv weights to nullptr below as we call pre-pack
   // during the first invocation of operator run. Refer to qconv.cpp for more
   // details. TODO Update to actually call pre-pack here once bias is removed
@@ -251,8 +229,8 @@ c10::intrusive_ptr<ConvPackedParamsBase<kSpatialDim>> PackedConvWeightsQnnp<kSpa
               groups,
               c10::nullopt, /* input_scale */
               {kernel_h, kernel_w},
-              static_cast<float>(weight.q_scale()),
-              static_cast<int32_t>(weight.q_zero_point())});
+              w_scales,
+              w_zero_points});
 
   return ret_ptr;
 }
