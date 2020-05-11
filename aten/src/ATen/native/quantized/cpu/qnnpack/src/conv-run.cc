@@ -426,8 +426,14 @@ enum pytorch_qnnp_status qnnpackConv(
               .output_col_increment =
                   (output_pixel_stride - groups) * sizeof(uint8_t),
               .quantization_params = conv_quantization_params,
-              .unipass_ukernel = pytorch_qnnp_params.q8dw9.updw,
-              .multipass_ukernel = pytorch_qnnp_params.q8dw25.mpdw,
+              .unipass_ukernel =
+                  conv_p.per_channel ?
+                      pytorch_qnnp_params.q8dw9.updw_per_channel :
+                      pytorch_qnnp_params.q8dw9.updw,
+              .multipass_ukernel =
+                  conv_p.per_channel ?
+                      pytorch_qnnp_params.q8dw25.mpdw_per_channel :
+                      pytorch_qnnp_params.q8dw25.mpdw,
           };
           pthreadpool_compute_2d(
               threadpool,
@@ -455,8 +461,14 @@ enum pytorch_qnnp_status qnnpackConv(
               .output_col_increment =
                   (output_pixel_stride - groups) * sizeof(uint8_t),
               .quantization_params = conv_quantization_params,
-              .unipass_ukernel = pytorch_qnnp_params.q8dw9.updw,
-              .multipass_ukernel = pytorch_qnnp_params.q8dw25.mpdw,
+              .unipass_ukernel =
+                  conv_p.per_channel ?
+                      pytorch_qnnp_params.q8dw9.updw_per_channel :
+                      pytorch_qnnp_params.q8dw9.updw,
+              .multipass_ukernel =
+                  conv_p.per_channel ?
+                      pytorch_qnnp_params.q8dw25.mpdw_per_channel :
+                      pytorch_qnnp_params.q8dw25.mpdw,
           };
           pthreadpool_compute_2d(
               threadpool,
