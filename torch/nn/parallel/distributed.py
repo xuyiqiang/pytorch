@@ -9,6 +9,11 @@ import torch.distributed as dist
 
 if dist.is_available():
     from torch.distributed.distributed_c10d import _get_default_group
+    from torch.distributed import (
+        _default_bucket_bytes_cap,
+        _default_broadcast_bucket_bytes,
+        _default_first_bucket_bytes,
+    )
 
 from ..modules import Module
 from .replicate import replicate
@@ -210,7 +215,8 @@ class DistributedDataParallel(Module):
     """
     def __init__(self, module, device_ids=None,
                  output_device=None, dim=0, broadcast_buffers=True,
-                 process_group=None, bucket_cap_mb=25,
+                 process_group=None,
+                 bucket_cap_mb=_default_bucket_bytes_cap() / (1024 * 1024),
                  find_unused_parameters=False,
                  check_reduction=False):
 
@@ -269,13 +275,11 @@ class DistributedDataParallel(Module):
             # do not receive gradients.
             pass
 
-        MB = 1024 * 1024
-
         # used for intra-node param sync and inter-node sync as well
-        self.broadcast_bucket_size = int(250 * MB)
+        self.broadcast_bucket_size = _default_broadcast_bucket_bytes()
 
         # reduction bucket size
-        self.bucket_bytes_cap = int(bucket_cap_mb * MB)
+        self.bucket_bytes_cap = int(bucket_cap_mb * 1024 * 1024)
 
         # Sync params and buffers
         module_states = list(self.module.state_dict().values())
@@ -380,8 +384,13 @@ class DistributedDataParallel(Module):
         # computation finishes. Experiments showed 1MB is a reasonable value.
         bucket_indices = dist._compute_bucket_assignment_by_size(
             parameters[0],
-            [1024 * 1024, self.bucket_bytes_cap],
+            [_default_first_bucket_bytes(), self.bucket_bytes_cap],
             expect_sparse_gradient[0])
+
+        # The gloo process group is used internally for reducer to do CPU tensors
+        # collective communication, such as get global usused parameters, sync up
+        # rebuilt bucket indices and etc
+        self.process_group_gloo = dist.new_group(backend="gloo")
 
         # Note: reverse list of buckets because we want to approximate the
         # order in which their gradients are produced, and assume they
@@ -390,7 +399,9 @@ class DistributedDataParallel(Module):
             parameters,
             list(reversed(bucket_indices)),
             self.process_group,
-            expect_sparse_gradient)
+            self.process_group_gloo,
+            expect_sparse_gradient,
+            self.bucket_bytes_cap)
 
         # passing a handle to torch.nn.SyncBatchNorm layer
         self._passing_sync_batchnorm_handle(self._module_copies)
@@ -399,6 +410,7 @@ class DistributedDataParallel(Module):
         self._check_default_group()
         attrs = copy.copy(self.__dict__)
         del attrs['process_group']
+        del attrs['process_group_gloo']
         del attrs['reducer']
         return attrs
 
